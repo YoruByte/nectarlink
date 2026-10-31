@@ -642,12 +642,18 @@ bool runOnQtMainThreadSync(F &&fn, uint32_t timeout_ms = 500)
         std::mutex mutex;
         std::condition_variable cv;
         bool done = false;
+        bool cancelled = false;
     };
     auto state = std::make_shared<SyncState>();
     auto task = std::make_shared<std::decay_t<F>>(std::forward<F>(fn));
     QMetaObject::invokeMethod(
         app,
         [state, task]() {
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                if (state->cancelled)
+                    return;
+            }
             (*task)();
             {
                 std::lock_guard<std::mutex> lock(state->mutex);
@@ -657,9 +663,12 @@ bool runOnQtMainThreadSync(F &&fn, uint32_t timeout_ms = 500)
         },
         Qt::QueuedConnection);
     std::unique_lock<std::mutex> lock(state->mutex);
-    return state->cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&state]() {
+    bool completed = state->cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&state]() {
         return state->done;
     });
+    if (!completed)
+        state->cancelled = true;
+    return completed;
 }
 } // namespace
 #endif
