@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Trigger GitHub Cloud Build for NectarLink Linux (AppImage + Arch pacman package)
 set -euo pipefail
 
