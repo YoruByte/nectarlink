@@ -1,0 +1,129 @@
+name: Build_Linux_Packages
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  QT_VERSION: "6.12.0"
+
+jobs:
+  build_linux:
+    name: Build_AppImage_And_Arch_Package
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout_Repository
+        uses: actions/checkout@v4
+
+      - name: Install_Rust_Toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+
+      - name: Install_System_Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libgl1-mesa-dev libx11-dev libxcb1-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfontconfig1-dev \
+            libfreetype-dev libdbus-1-dev libxtst-dev libavcodec-dev libavutil-dev \
+            file desktop-file-utils appstream zstd libarchive-tools
+          pkg-config --exists libavcodec libavutil
+
+      - name: Install_Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: linux
+          target: desktop
+          arch: linux_gcc_64
+          modules: qtshadertools qtwaylandcompositor
+          cache: true
+          aqtsource: git+https://github.com/miurahr/aqtinstall.git
+
+      - name: Install_AppImage_Tool
+        run: |
+          curl -fsSL -o /tmp/appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          curl -fsSL -o /tmp/runtime-x86_64 \
+            https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
+          chmod +x /tmp/appimagetool
+          sudo mv /tmp/appimagetool /usr/local/bin/appimagetool
+          echo "APPIMAGE_RUNTIME=/tmp/runtime-x86_64" >> "$GITHUB_ENV"
+          echo "APPIMAGE_EXTRACT_AND_RUN=1" >> "$GITHUB_ENV"
+
+      - name: Cache_FFmpeg_Sources
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ffmpeg-sources
+          key: ffmpeg-sources-${{ hashFiles('desktop/packaging/linux/build-ffmpeg-backends.sh') }}
+
+      - name: Build_Binaries_And_FFmpeg_Adapters
+        env:
+          FFMPEG_SOURCE_CACHE: ${{ runner.temp }}/ffmpeg-sources
+        run: |
+          cargo build --release -p nectarlink-desktop
+          bash ./desktop/packaging/linux/build-ffmpeg-backends.sh
+
+      - name: Build_AppImage
+        run: |
+          ./desktop/packaging/linux/build-appimage.sh
+
+      - name: Build_Arch_Package
+        run: |
+          ./desktop/packaging/linux/build_arch.sh
+
+      - name: Verify_AppImage
+        run: |
+          ./dist/*.AppImage --version
+
+      - name: Verify_Arch_Package_In_Arch_Container
+        run: |
+          docker run --rm -v "$PWD/dist:/dist:ro" archlinux:latest bash -euc '
+            pacman -Sy --noconfirm >/dev/null
+            pacman -U --noconfirm /dist/*.pkg.tar.zst
+            nectarlink-desktop --version'
+
+      - name: Upload_Build_Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: NectarLink_Linux_Packages
+          path: |
+            dist/*.AppImage
+            dist/*.pkg.tar.zst
+
+      - name: Create_GitHub_Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('build_{0}', github.run_number) }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('NectarLink Linux Build {0}', github.run_number) }}
+          body: |
+            ## 🚀 NectarLink Linux Packages
+
+            * **Commit:** `${{ github.sha }}`
+
+            ### 📦 Included Packages:
+            1. **Arch Linux (`pacman -U`):** `nectarlink-*.pkg.tar.zst`
+               * Install with: `sudo pacman -U <filename>.pkg.tar.zst`
+            2. **AppImage:** `Nectarlink-*.AppImage`
+               * Run directly: `chmod +x <filename>.AppImage && ./<filename>.AppImage`
+          files: |
+            dist/*.AppImage
+            dist/*.pkg.tar.zst
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
